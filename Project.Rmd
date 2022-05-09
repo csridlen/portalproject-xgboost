@@ -1,5 +1,5 @@
 ---
-title: "Project"
+title: "Forecasting Rodent Species Diversity in a Chihuahuan Desert Ecosystem"
 author: "Christina Ridlen"
 date: "5/9/2022"
 output: pdf_document
@@ -52,7 +52,7 @@ for(year in rodent_data["year"]){
 }
 
 # The portalr package allows us to summarize weather data monthly
-weather_data_raw <- weather(level = "monthly", fill = TRUE, horizon = 30)
+weather_data_raw <- weather(level = "monthly", fill = TRUE, horizon = 30, path = "PortalData")
 
 # Data cleaning
 weather_data <- filter(weather_data_raw, year >= 1989)
@@ -193,13 +193,13 @@ After considering necessary modifications for working with time series data, the
 
 -   location[^1]
 
--   minimum temperature
+-   minimum temperature (C)
 
--   maximum temperature
+-   maximum temperature (C)
 
 -   difference between maximum and minimum temperature in the month
 
--   mean temperature
+-   mean temperature (C)
 
 -   precipitation
 
@@ -292,8 +292,7 @@ vip
 
 x <- data.matrix(subset(rodents_train, select = -n_permonth))
 x <- mltools::one_hot(data.table::data.table(x))
-p1 <- pdp::partial(boost_model$fit, pred.var = "mintemp", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2") + 
-  ylab("Predicted Change in Rodent Population")
+p1 <- pdp::partial(boost_model$fit, pred.var = "mintemp", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2")
 
 
 p2 <- pdp::partial(boost_model$fit, pred.var = "precipitation", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2")
@@ -327,10 +326,14 @@ knitr::kable(best_boost_params, col.names = c("Tree Depth", "Learn Rate", "Sampl
 
 ### Partial Dependence Plots
 
-```{r pdp_app, echo = FALSE}
-ggpubr::ggarrange(p1, p2, p3, p4, 
+```{r pdp_app, include = FALSE}
+figure <- ggpubr::ggarrange(p1, p2, p3, p4, 
                   ncol = 2,
                   nrow = 2)
+```
+
+```{r pdp2_app, echo = FALSE}
+figure
 ```
 
 ### Autocorrelation function of response variable
