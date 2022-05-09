@@ -1,15 +1,22 @@
+---
+title: "Project"
+author: "Christina Ridlen"
+date: "5/9/2022"
+output: pdf_document
+---
+
+
+```{r libraries, include = FALSE}
 library(tidyverse)
 library(portalr)
 library(lubridate)
 library(tidymodels)
+```
 
 
-# Load in the data with read_csv
+```{r data_cleaning, include = FALSE}
 rodent_data <- read_csv("PortalData/Rodents/Portal_rodent.csv")
 species_data <- read_csv("PortalData/Rodents/Portal_rodent_species.csv")
-
-### Data cleaning
-
 
 # Select relevant variables
 rodent_data <- rodent_data[, c(1, 2, 4, 8, 9, 31)]
@@ -30,7 +37,28 @@ for(year in rodent_data["year"]){
   }
 }
 
-### Feature engineering
+# The portalr package allows us to summarize weather data monthly
+weather_data_raw <- weather(level = "monthly", fill = TRUE, horizon = 30)
+
+# Data cleaning
+weather_data <- filter(weather_data_raw, year >= 1989)
+
+# Select relevant columns
+weather_data <- weather_data[, c(c(1:6), 9)]
+
+# Create timestamp
+for(year in weather_data["year"]){
+  for(month in weather_data["month"]){
+    weather_data["timestamp"] = make_datetime(year, month)
+  }
+}
+
+## Create temperature difference variable
+weather_data <- weather_data %>%
+  mutate(tempdiff = maxtemp - mintemp)
+```
+
+```{r feature_engineering, include = FALSE}
 # Create species diversity parameter
   
 n_permonth <- rodent_data %>%
@@ -54,15 +82,35 @@ for(year in percent_change["year"]){
 
 # Select only time series part with timestamp
 percent_change <- subset(percent_change, select = c(n_permonth, timestamp))
+```
 
+```{r data_viz, echo = FALSE}
+# What are most popular species?
+top_5 <- head(rodent_data %>%
+  group_by(commonname) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)), 5)
+
+
+plot_data <- rodent_data %>%
+  filter(commonname %in% top_5$commonname | scientificname == "Dipodomys spectabilis")
+
+ggplot(plot_data) +
+  geom_line(aes(x = timestamp, y = n_permonth, col = species)) + 
+  facet_wrap(~commonname, nrow = 6) + 
+  ylab("Percent Change per Month") + 
+  xlab(" ")
+```
+
+```{r time_series, include = FALSE}
 #### Time Series Analysis
 percent_change$n_permonth = ts(percent_change$n_permonth, deltat = 1/12, start = c(1989, 1, 1))
 decm <- decompose(percent_change$n_permonth)
-plot(decm)
+
 
 # Remove seasonality
 percent_change$n_permonth <- percent_change$n_permonth - decm$seasonal
-acf(percent_change$n_permonth) # shows MA; 1 and 6 lags significant
+
 percent_change$n_permonth <- as.vector(percent_change$n_permonth) # so we can create lags
 
 
@@ -70,28 +118,6 @@ percent_change$n_permonth <- as.vector(percent_change$n_permonth) # so we can cr
 percent_change <- percent_change %>%
   mutate(l1_permonth = lag(n_permonth, n = 1, default = 0),
          l6_permonth = lag(n_permonth, n = 6, default = 0))
-
-## Let's look at weather data
-# The portalr package allows us to summarize weather data monthly
-weather_data_raw <- weather(level = "monthly", fill = TRUE, horizon = 30)
-
-# Data cleaning
-weather_data <- filter(weather_data_raw, year >= 1989)
-
-# Select relevant columns
-weather_data <- weather_data[, c(c(1:6), 9)]
-
-# Create timestamp
-for(year in weather_data["year"]){
-  for(month in weather_data["month"]){
-    weather_data["timestamp"] = make_datetime(year, month)
-  }
-}
-
-## Create temperature difference variable
-weather_data <- weather_data %>%
-  mutate(tempdiff = maxtemp - mintemp)
-
 
 ### Time series weather data
 # Remove seasonality
@@ -118,7 +144,15 @@ weather_ts <- weather_ts %>%
 weather_lags <- weather_ts[, c(7:12)]
 weather_data <- subset(weather_data, select = -c(year, month))
 weather_data <- data.frame(weather_data, weather_lags)
+```
 
+```{r time_series_plots, echo = FALSE}
+plot(decm)
+acf(percent_change$n_permonth) # shows MA; 1 and 6 lags significant
+```
+
+
+```{r working_data, include = FALSE}
 #### Create working data for modeling
 # Join percent_change with weather data by timestamp
 working_data <- full_join(percent_change, weather_data, by = "timestamp")
@@ -127,7 +161,11 @@ rodent_data <- full_join(rodent_data, working_data, by = "timestamp")
 rodent_data <- na.omit(rodent_data)
 
 rodent_num <- subset(rodent_data, select = -c(timestamp, species, recordID, month, year, species, id, scientificname, taxa, commonname))
-### Now data is ready for analysis
+
+```
+
+
+```{r xgboost, include = FALSE}
 ### XGBoost
 
 # Train-test split
@@ -183,11 +221,9 @@ boost_predictions <- boost_model %>%
 rmse_out_boost <- rmse(boost_predictions,
                        estimate = .pred,
                        truth = n_permonth)
+```
 
-# Create table of in-sample and out of sample performance
-# in_table <- data.frame(c(in_metrics$.metric, in_metrics$mean, in_metrics$std_err))
-# colnames(in_table) <- c("Metric", "Cross-Validated Mean Estimate", "Standard Error")
-
+```{r xgboost_tables, echo = FALSE}
 ### Table of best parameters
 best_boost_params <- data.frame(subset(best_boost_params, select = -c(.config)))
 knitr::kable(best_boost_params, col.names = c("Tree Depth", "Learn Rate", "Sample Size"))
@@ -201,16 +237,12 @@ out_table <- data.frame(subset(rmse_out_boost, select = -c(.estimator)))
 knitr::kable(out_table, col.names = c("Metric", "Out-of-Sample Estimate"))
 
 ### Variable importance
-vip::vip(boost_model, aesthetics = list(fill = rainbow(10)))
+vip <- vip::vip(boost_model, aesthetics = list(fill = rainbow(10)))
+vip
 
 ### Partial dependence plots
 
+```
 
-###### Data visualization
 
-  
-  
-  
-  
-  
-  
+
