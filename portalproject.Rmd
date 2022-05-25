@@ -1,0 +1,343 @@
+---
+title: "Forecasting Rodent Species Diversity in a Chihuahuan Desert Ecosystem"
+author: "Christina Ridlen"
+date: "5/9/2022"
+output: pdf_document
+---
+
+```{r libraries, include = FALSE}
+library(tidyverse)
+library(portalr)
+library(lubridate)
+library(tidymodels)
+```
+
+# Abstract
+
+This paper explores a dataset of rodent populations in the Chihuahuan desert near Portal, AZ and incorporates various climatological features to predict percent changes in species diversity over time. A gradient boosted tree model is utilized to forecast the response one period ahead, treating forecasting as a supervised learning model. The boosted model successfully predicts change in diversity one period ahead and allows for demonstration of variables with the highest predictive value for species diversity.
+
+# Introduction
+
+As climate changes dramatically each year, the state of desert environments is of particular interest. On one hand, deserts are well-suited to environmental changes; extreme heat and drought, monsoons, and large differences in daily temperatures between night and day. But climate change is already threatening the state of natural ecosystems, especially as Arizona faces one of lowest water supplies in a century.
+
+This analysis uses data from [The Portal Project](https://portal.weecology.org/), where researchers have observed an ecological site near Portal, AZ to study the effects of climate on habitants within the desert ecosystem. Their observations include those of different rodents, plants and insects as well as local weather reports in this Chihuahuan desert setting. I chose to work with this data because I am interested in how the desert will be impacted by rising temperatures and changing weather patterns. This dataset is useful in particular because it is an automated tracking system, so there are few errors in records due to human error. In particular, it is interesting to note that even during the beginning stages of the covid pandemic recording still continued. I'm not an ecologist and know very little about ecology, but such a controlled environment of observation is invaluable for tracking part of our world's response to the changing environment.
+
+Additionally, I am interested in approaching time series forecasting with the machine learning tools I have learned in the past semester. Gradient boosted trees are popular with time series practitioners today, and are practical substitutes for other complicated, time-series specific models. This paper seeks to find the best predictive model for forecasting in a less traditional setting as is usually seen in time series analysis, specifically, rodent populations.
+
+# Methods
+
+I am specifically working with the Portal Projects data on rodents and weather. I created a variable `n_permonth` that measures the percent change in unique species in the project ecosystem. This can be interpreted as a "change in diversity" parameter. Included in the figure below is the change in species counts over time for six different species.
+
+```{r data_cleaning, include = FALSE}
+rodent_data <- read_csv("PortalData/Rodents/Portal_rodent.csv")
+species_data <- read_csv("PortalData/Rodents/Portal_rodent_species.csv")
+
+# Select relevant variables
+rodent_data <- rodent_data[, c(1, 2, 4, 8, 9, 31)]
+
+# Replace "" with Unknown
+rodent_data[rodent_data == ""] <- "Unknown"
+rodent_data <- filter(rodent_data, year >= 1989)
+
+# Let's add more descriptions to rodent data from species data
+subset <- species_data[, c(1:4)]
+subset <- rename(subset, "species" = "speciescode") #rename variable so they match
+rodent_data <- full_join(rodent_data, subset, by = "species")
+
+# Create timestamp for rodent data-- we'll need this for merging monthly counts
+for(year in rodent_data["year"]){
+  for(month in rodent_data["month"]){
+    rodent_data["timestamp"] = make_datetime(year, month)
+  }
+}
+
+# The portalr package allows us to summarize weather data monthly
+weather_data_raw <- weather(level = "monthly", fill = TRUE, horizon = 30, path = "repo")
+
+# Data cleaning
+weather_data <- filter(weather_data_raw, year >= 1989)
+
+# Select relevant columns
+weather_data <- weather_data[, c(c(1:6), 9)]
+
+# Create timestamp
+for(year in weather_data["year"]){
+  for(month in weather_data["month"]){
+    weather_data["timestamp"] = make_datetime(year, month)
+  }
+}
+
+## Create temperature difference variable
+weather_data <- weather_data %>%
+  mutate(tempdiff = maxtemp - mintemp)
+```
+
+```{r feature_engineering, include = FALSE}
+# Create species diversity parameter
+  
+n_permonth <- rodent_data %>%
+  group_by(year, month, species) %>%
+  filter(!is.na(year)) %>%
+  count() %>%
+  group_by(year, month) %>%
+  summarize(permonth = sum(n))
+
+percent_change <- as.data.frame(n_permonth) %>%
+  mutate(n_permonth = round((permonth/lag(permonth) - 1) * 100, 4))
+
+percent_change[is.na(percent_change)] = 0 # change NA to 0
+
+# Create timestamp for merging
+for(year in percent_change["year"]){
+  for(month in percent_change["month"]){
+    percent_change["timestamp"] = make_datetime(year, month)
+  }
+}
+
+# Select only time series part with timestamp
+percent_change <- subset(percent_change, select = c(n_permonth, timestamp))
+```
+
+```{r time_series, include = FALSE}
+#### Time Series Analysis
+percent_change$n_permonth = ts(percent_change$n_permonth, deltat = 1/12, start = c(1989, 1, 1))
+decm <- decompose(percent_change$n_permonth)
+
+
+# Remove seasonality
+percent_change$n_permonth <- percent_change$n_permonth - decm$seasonal
+
+percent_change$n_permonth <- as.vector(percent_change$n_permonth) # so we can create lags
+
+
+# Create lagged variable n_permonth
+percent_change <- percent_change %>%
+  mutate(l1_permonth = lag(n_permonth, n = 1, default = 0),
+         l6_permonth = lag(n_permonth, n = 6, default = 0))
+
+### Time series weather data
+# Remove seasonality
+glimpse(weather_data) # see which variables are time series
+weather_ts <- subset(weather_data, select = -c(year, month, timestamp))
+
+for(i in 1:ncol(weather_ts)){
+  m <- ts(weather_ts[i], deltat = 1/12, start = c(1989, 1, 1))
+  n <- decompose(m)
+  j <- m - n$seasonal
+  weather_ts[i] = as.vector(j)
+}
+
+# Create lagged variables of weather time series
+weather_ts <- weather_ts %>%
+  mutate(l_tempdiff = lag(tempdiff, n = 1, default = 0),
+         l_mintemp = lag(mintemp, n = 1, default = 0),
+         l_maxtemp = lag(maxtemp, n = 1, default = 0),
+         l_meantemp = lag(meantemp, n = 1, default = 0),
+         l_precipitation = lag(precipitation, n = 1, default = 0),
+         l_warm_days = lag(warm_days, n = 1, default = 0),
+         l_tempdiff = lag(tempdiff, n = 1, default = 0))
+
+weather_lags <- weather_ts[, c(7:12)]
+weather_data <- subset(weather_data, select = -c(year, month))
+weather_data <- data.frame(weather_data, weather_lags)
+```
+
+```{r working_data, include = FALSE}
+#### Create working data for modeling
+# Join percent_change with weather data by timestamp
+working_data <- full_join(percent_change, weather_data, by = "timestamp")
+rodent_data <- full_join(rodent_data, working_data, by = "timestamp")
+## Remove NA
+rodent_data <- na.omit(rodent_data)
+
+rodent_num <- subset(rodent_data, select = -c(timestamp, species, recordID, month, year, species, id, scientificname, taxa, commonname))
+
+```
+
+```{r data_viz, echo = FALSE}
+# What are most popular species?
+top_5 <- head(rodent_data %>%
+  group_by(commonname) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)), 5)
+
+
+plot_data <- rodent_data %>%
+  filter(commonname %in% top_5$commonname | scientificname == "Dipodomys spectabilis")
+
+ggplot(plot_data) +
+  geom_line(aes(x = timestamp, y = n_permonth, col = species)) + 
+  facet_wrap(~commonname, nrow = 6) + 
+  ylab("Percent Change per Month") + 
+  xlab(" ")
+```
+
+The six species plotted, excluding the Banner-tailed kangaroo rat, are the 5 most frequently observed species in the dataset. I included the Banner-tailed kangaroo because it went extinct around 2004 according to the Portal researchers, with a resurgence just around 2010. It is interesting to see here similarities in the peaks and troughs in the population changes of these species. For example, all species except the Desert pocket mouse show a spike in growth around 2017, while all six species show a smaller, negative spike near 2009. An ecologist could look at weather data around these times to give climatological context as to what occurred to give such rises and falls in population.
+
+## Working with time series data
+
+Time series data are unique in that time itself is an important feature in the outcome of the response variable. It is important to decompose time series into seasonal and time trend components, as well as to observe the part of the series that is truly random. In the appendix is the plotted autocorrelation function of the response variable, which appears to be an moving average process with statistical significance in the first and sixth lags. Additionally, I include the decomposed `n_permonth` series below.
+
+```{r time_series_plots, echo = FALSE}
+plot(decm)
+
+```
+
+As is expected, there is a strong seasonality component, but luckily the data appear to be otherqise stationary. I remove the seasonality component in the response variable to remove noise from seasonal trends. Nearly all of the features included in the model have a seasonal component (since they are weather variables), so I decompose them and correct for seasonality as well.
+
+## Gradient boosted tree model
+
+After considering necessary modifications for working with time series data, the features considered in the model are:
+
+-   percent change per month, with lags by one period and by six periods
+
+-   location[^1]
+
+-   minimum temperature (C)
+
+-   maximum temperature (C)
+
+-   difference between maximum and minimum temperature in the month
+
+-   mean temperature (C)
+
+-   precipitation
+
+-   number of warm days
+
+-   one period lags for all weather variables
+
+[^1]: Relative location in the observation area, which is divided into 66 different "stakes" numbered from 11 to 77.
+
+```{r xgboost, include = FALSE, cache = TRUE}
+### XGBoost
+
+# Train-test split
+working_ts <- subset(rodent_num)
+working_ts <- na.omit(working_ts)
+rodents_split <- initial_split(working_ts, prop = 0.8) # 80% of the data will be training the model
+rodents_train <- training(rodents_split)
+rodents_test <- testing(rodents_split)
+
+# Create folds for cross-validation
+folds <- vfold_cv(rodents_train, v = 5)
+
+# First, create the boosting specification with space for tuning
+boost_spec <- boost_tree(
+  trees = 500,
+  learn_rate = tune(),
+  tree_depth = tune(),
+  sample_size = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+# Set up tuning grid for tuning hyper-parameters
+tunegrid_boost <- grid_regular(parameters(boost_spec), levels = 2)
+
+tune_results <- tune_grid(boost_spec,
+                          n_permonth ~ . ,
+                          resamples = folds,
+                          grid = tunegrid_boost,
+                          metrics = metric_set(rmse))
+
+
+# Select best parameters
+best_boost_params <- select_best(tune_results)
+final_boost_spec <- finalize_model(boost_spec, best_boost_params)
+
+boost_model <- final_boost_spec %>% fit(formula = n_permonth ~ .,
+                                        data = rodents_train)
+
+## CV in-sample performance
+cv_boost <- fit_resamples(final_boost_spec,
+                          n_permonth ~ .,
+                          resamples = folds,
+                          metrics = metric_set(rmse))
+
+in_metrics <- collect_metrics(cv_boost)
+
+# Out-of-sample performance
+boost_predictions <- boost_model %>%
+  predict(rodents_test) %>%
+  bind_cols(rodents_test)
+
+
+rmse_out_boost <- rmse(boost_predictions,
+                       estimate = .pred,
+                       truth = n_permonth)
+```
+
+I fit a gradient boosted regression tree to investigate the effect of all features on the percent change in diversity parameter. The data is split into training and testing subsets, with 80% of the data going to training and 20% going to testing for assessment of the accuracy of the model. I then create a tuning grid to choose the best hyperparameters for the boosted model, which are summarized in the results section. Using a cross-validated approach, the in-sample RMSE is calculated as the average of the predictions from 5 folds of the training data. The out-of-sample RMSE is calculated last using the testing data.
+
+The goal of this analysis is to forecast one period ahead by using a lagged value of the outcome variable in the set of features. Additionally, the nonparametric approach of a tree-based method allows us to estimate using a multivariate set of features, whereas in a traditional statistical approach we would have to place many limiting restrictions on model structure.
+
+# Results
+
+The optimal tree parameters found by a cross-validated tuning grid are summarized in the appendix. The first two tables display the in-sample and out-of-sample prediction error of the optimized boosted tree model. Finally, I include variable importance plots and partial dependence plots to explore the boosted tree's predictions.
+
+```{r xgboost_tables, echo = FALSE}
+
+### Table of in-sample performance
+in_table <- data.frame(subset(in_metrics, select = -c(.config, .estimator)))
+knitr::kable(in_table, col.names = c("Metric", "Mean CV Estimate", "Number of folds", "Standard Error"))
+### Table of out-of-sample performance
+out_table <- data.frame(subset(rmse_out_boost, select = -c(.estimator)))
+knitr::kable(out_table, col.names = c("Metric", "Out-of-Sample Estimate"))
+
+### Variable importance
+vip <- vip::vip(boost_model, aesthetics = list(fill = rainbow(10)))
+vip
+
+### Partial dependence plots
+
+x <- data.matrix(subset(rodents_train, select = -n_permonth))
+x <- mltools::one_hot(data.table::data.table(x))
+p1 <- pdp::partial(boost_model$fit, pred.var = "mintemp", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2")
+
+
+p2 <- pdp::partial(boost_model$fit, pred.var = "precipitation", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2")
+
+
+p3 <- pdp::partial(boost_model$fit, pred.var = "tempdiff", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2")
+
+
+p4 <-  pdp::partial(boost_model$fit, pred.var = "mintemp", plot = TRUE, train = x, type = "regression", plot.engine = "ggplot2")
+
+
+```
+
+# Conclusion
+
+The boosted model exceeded expectations in its prediction accuracy. The in-sample and out-of-sample RMSE are significantly low, considering that the standard deviation of the response variable is about 47, or a 47% change in species diversity. Looking at the variable importance plot, we notice that the lagged response variable, obviously, is most important, but that many other of the features are important predictors as well. Notably, lagged minimum temperature is second most important, meaning that while desert organisms may be well-accustomed to high temperatures, low temperatures can cause disparities between the population of one period to the next. Precipitation and max temperature are least important, probably because desert climates are accustomed to periods of drought and extreme heat. Climate change does not only mean less rain and more sun, but can imply more extreme fluctuations in temperature as well.
+
+The gradient boosted model served well in forecasting one-period ahead percent changes in species diversity. For further research, this model could be expanded to include the ecosystem's plant diversity as features since rodents depend on these plants for sustenance. I have included partial dependence plots in the appendix, but these were a bit difficult to interpret.[^2] This analysis might be further supported with other measures of representing marginal dependence such as ICE plots. Additionally, this model could be expanded to forecast ahead even more periods; one period ahead is doable in many cases. I am pleased with the results of the model, but in the future would expand the analysis to include forecasting of several periods ahead.
+
+[^2]: The response variable includes a significant amount of percentages below zero, but the predicted response as a function of all the variables chosen show positive growth levels only.
+
+## Appendix
+
+### Boosted Tree Hyperparamters
+
+```{r appendix_xgboost, echo = FALSE}
+### Table of best parameters
+best_boost_params <- data.frame(subset(best_boost_params, select = -c(.config)))
+knitr::kable(best_boost_params, col.names = c("Tree Depth", "Learn Rate", "Sample Size"), caption = "Model parameters selected by tuning")
+```
+
+### Partial Dependence Plots
+
+```{r pdp_app, include = FALSE}
+figure <- ggpubr::ggarrange(p1, p2, p3, p4, 
+                  ncol = 2,
+                  nrow = 2)
+```
+
+```{r pdp2_app, echo = FALSE}
+figure
+```
+
+### Autocorrelation function of response variable
+
+```{r acf_appendix, echo = FALSE}
+acf(percent_change$n_permonth) # shows MA; 1 and 6 lags significant
+```
