@@ -1,0 +1,23 @@
+---
+title: "Forecasting Rodent Species Diversity in a Chihuahuan Desert Ecosystem"
+author: "Christina Ridlen"
+date: "5/9/2022"
+output: md_document
+---
+
+```{r libraries, include = FALSE}
+library(tidyverse)
+library(portalr)
+library(lubridate)
+library(tidymodels)
+```
+
+```{r data_cleaning, include = FALSE}
+
+setwd("C:/Users/tinar/forecastportal")
+rodent_data <- read.csv("Portal_rodent.csv")
+species_data <- read.csv("Portal_rodent_species.csv")
+
+```
+
+
